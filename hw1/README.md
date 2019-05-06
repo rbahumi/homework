@@ -79,3 +79,7 @@ If you with to build the docker container yourself, maybe starting from a differ
 cd hw1
 docker build -t cs294_roboschool_image -f Dockerfile .
 ```
+
+
+# HW assignment:
+- Added the solutions for the Behavioral Cloning part of the hw assignment in the [Behavioral Cloning notebook](notebooks/Behavioral%20Cloning.ipynb)

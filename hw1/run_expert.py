@@ -21,15 +21,8 @@ import pickle
 import tensorflow as tf
 import numpy as np
 import gym
-import tf_util
-import load_policy
-
-
-EXPERT_DIR = "experts"
-ROBOSCOOL_EXPERT_DATA_DIR = 'hw1/expert_data'
-SUPERVISED_MODELD_DATA_DIR = 'hw1/supervised_modeled_data'
-ROBOSCOOL_AVAILABLE_ENVS = ['RoboschoolAnt-v1', 'RoboschoolHumanoid-v1', 'RoboschoolHalfCheetah-v1', 'RoboschoolReacher-v1',
-                  'RoboschoolHopper-v1', 'RoboschoolWalker2d-v1']
+import tf_util, load_policy
+from consts import EXPERT_DIR, ROBOSCOOL_AVAILABLE_ENVS
 
 
 ROBOSCHOOL_ENGINE = 'Roboschool'
@@ -133,7 +126,7 @@ def main():
     parser.add_argument('expert_policy_file', type=str)
     parser.add_argument('envname', type=str)
     parser.add_argument('--engine', type=str, default=MOJOCO_ENGINE)
-    parser.add_argument('--render', action='store_true')
+    parser.add_argument('--render', action='store_false')
     parser.add_argument("--max_timesteps", type=int)
     parser.add_argument('--num_rollouts', type=int, default=20,
                         help='Number of expert roll outs')
