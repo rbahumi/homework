@@ -1,0 +1,58 @@
+\documentclass{article}
+\usepackage{blindtext}
+\usepackage{bbm}
+\usepackage{amsmath}
+\usepackage{esvect}
+
+% No space in the title
+\usepackage{titling}
+\setlength{\droptitle}{-10em}
+
+\title{Cross Entropy Loss Derivative}
+\author{Roei Bahumi}
+\date{}
+
+\begin{document}
+\maketitle
+In a Supervised Learning Classification task, the "Softmax Classifier" computes the cross-entropy loss:
+$$H(p, q) = - \sum_{x} p(x)\log q(x)$$
+%In Information Theory, $p$ is the true distribution and $q$ is the estimated distribution.
+% In the Classifcation task
+We use a 1-hot encoded vector for $p$, where the 1 is at the index of the true label ($y$):
+$$
+p_i(x)=\begin{cases}
+               1 \hspace{30pt} \text{if y=i}\\
+               0 \hspace{30pt} \text{otherwise}\\
+            \end{cases}
+$$
+
+and the softmax function over the logits outputs ($z$) as our $q$:
+\\
+$$q_i(z) = \frac{e^{z_i}}{\sum_{j} e^{z_j}}$$
+\\
+Because the only non-zero element of $p$ is at the $y$ index, the $p$ vector is in practice a selector for the true label's index in the $q$ vector. Therefore, the loss function for a single sample then becomes:
+$$Loss = -\log(\frac{e^{z_{y}}}{\sum_{j} e^{z_j}}) = -z_{y} + \log \sum_{j} e^{z_j}$$
+\\
+
+Calculating the derivative for each $z_i$:
+\\
+\begin{align*}
+\nabla_{z_i}Loss & = \nabla_{z_i}(-z_{y} + \log \sum_{j} e^{z_j}) \\
+                 & = \nabla_{z_i}\log \sum_{j} e^{z_j} -\nabla_{z_i}z_{y} \\
+                 & = \frac{1}{\sum_{j} e^{z_j}}\nabla_{z_i}\sum_{j} e^{z_j} -\nabla_{z_i}z_{y} \hspace{30pt} &&\text{from} \hspace{10pt} \frac{d}{dx}ln[f(x)] = \frac{1}{f(x)}\frac{d}{dx}f(x)\\
+                 & = \frac{e^{z_i}}{\sum_{j} e^{z_j}} -\nabla_{z_i}z_{y} \\
+                 & = q_i(z) -\nabla_{z_i}z_{y} \\
+                 & = q_i(z) - \mathbbm{1}(y=i)
+\end{align*}
+\\
+
+The effect of $p(x)$, the 1-hot label vector on the gradient is therefore intuitive and directed towards the correct classification:
+\begin{itemize}
+  \item The gradient for the true label's logit ($q_y(z) - 1$) will be negative and decrease proportionally in magnitude as $q_y(z)$ increases.
+  \item The rest of the logits gradient ($q_i(z)$) will be positive and increase proportionally as $q_i(z)$ increases.
+  \item In the specific case of perfect classification where $q_y(z)=1$, the gradient will be $\vv{0}$.
+\end{itemize}
+
+% From Sutton book, how to use the term "inversely proportional":  The update increases the parameter vector in this direction proportional to the return, and inversely proportional to the action probability
+
+\end{document}
