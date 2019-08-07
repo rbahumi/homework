@@ -1,3 +1,4 @@
+from __future__ import print_function
 import seaborn as sns
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -48,13 +49,16 @@ the --legend flag and then provide a title for each logdir.
 
 """
 
-def plot_data(data, value="AverageReturn"):
+
+def plot_data(data, value="AverageReturn", title=None):
     if isinstance(data, list):
         data = pd.concat(data, ignore_index=True)
 
     sns.set(style="darkgrid", font_scale=1.5)
     sns.tsplot(data=data, time="Iteration", value=value, unit="Unit", condition="Condition")
-    plt.legend(loc='best').draggable()
+    plt.legend(loc='best').set_draggable(True)
+    if title is not None:
+        plt.title(title)
     plt.show()
 
 
@@ -63,23 +67,23 @@ def get_datasets(fpath, condition=None):
     datasets = []
     for root, dir, files in os.walk(fpath):
         if 'log.txt' in files:
-            param_path = open(os.path.join(root,'params.json'))
+            param_path = open(os.path.join(root, 'params.json'))
             params = json.load(param_path)
             exp_name = params['exp_name']
-            
-            log_path = os.path.join(root,'log.txt')
-            experiment_data = pd.read_table(log_path)
+
+            log_path = os.path.join(root, 'log.txt')
+            experiment_data = pd.read_csv(log_path, sep='\t')
 
             experiment_data.insert(
                 len(experiment_data.columns),
                 'Unit',
                 unit
-                )        
+            )
             experiment_data.insert(
                 len(experiment_data.columns),
                 'Condition',
                 condition or exp_name
-                )
+            )
 
             datasets.append(experiment_data)
             unit += 1
@@ -93,6 +97,7 @@ def main():
     parser.add_argument('logdir', nargs='*')
     parser.add_argument('--legend', nargs='*')
     parser.add_argument('--value', default='AverageReturn', nargs='*')
+    parser.add_argument('--title', default=None, nargs='*')
     args = parser.parse_args()
 
     use_legend = False
@@ -113,8 +118,18 @@ def main():
         values = args.value
     else:
         values = [args.value]
-    for value in values:
-        plot_data(data, value=value)
+
+    if isinstance(args.title, list):
+        titles = args.title
+    else:
+        titles = [args.title]
+
+    if len(titles) != len(values):
+        titles = [None] * len(values)
+
+    for i, value in enumerate(values):
+        plot_data(data, value=value, title=titles[i])
+
 
 if __name__ == "__main__":
     main()

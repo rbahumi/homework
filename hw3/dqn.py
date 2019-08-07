@@ -5,6 +5,7 @@ import sys
 import gym.spaces
 import itertools
 import numpy as np
+import pandas as pd
 import random
 import tensorflow                as tf
 import tensorflow.contrib.layers as layers
@@ -12,6 +13,7 @@ from collections import namedtuple
 from dqn_utils import *
 
 OptimizerSpec = namedtuple("OptimizerSpec", ["constructor", "kwargs", "lr_schedule"])
+HDF_KEY = "default"
 
 class QLearner(object):
 
@@ -100,6 +102,9 @@ class QLearner(object):
     self.session = session
     self.exploration = exploration
     self.rew_file = str(uuid.uuid4()) + '.pkl' if rew_file is None else rew_file
+    # Add attributes to generate the results pd.DataFrame
+    self.results = []
+    self.hdf_file = self.rew_file.replace("pkl", "hdf")
 
     ###############
     # BUILD MODEL #
@@ -159,6 +164,46 @@ class QLearner(object):
     ######
 
     # YOUR CODE HERE
+    # Create the Q network using current state/observation (obs_t_float) as the input placeholder.
+    q_net_scope = "q_net"
+    self.q_net = q_func(obs_t_float, num_actions=self.num_actions, scope=q_net_scope, reuse=False)
+    q_func_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=q_net_scope)
+
+    # Create the target network using the next state/observation (obs_tp1_float) as the input placeholder.
+    target_net_scope = "q_target_net"
+    self.target_net = q_func(obs_tp1_float, num_actions=self.num_actions, scope=target_net_scope, reuse=False)
+    target_q_func_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=target_net_scope)
+
+    # Choose the action with maximal value
+    self.action = tf.squeeze(tf.math.argmax(input=self.q_net, axis=1))
+
+    # Calculate the Bellman error
+    # 1. Current q value
+    # Running "q_t = tf.reduce_max(self.q_net, axis=1)" will not work here because we sample some of the actions randomly.
+    # In order to calculate the error, we need to use the value of the applied actions
+    q_t = tf.reduce_sum(tf.multiply(self.q_net, tf.one_hot(self.act_t_ph, self.num_actions)), axis=1)
+
+    # 2. Next observation q value
+    if not double_q:
+      # Regular DQN
+      q_tp1 = tf.reduce_max(self.target_net, axis=1)
+    else:
+      # Double DQN
+      # Use the online network variables to construct a new network with the next state observation as input
+      # Note: There no need to call tf.stop_gradient() explicitly on the new network, it happens implicitly when calling tf.argmax().
+      # tf.argmax() returns an integer and Tensorflow integers don't have gradients. They are considered constants. (https://www.tensorflow.org/api_docs/python/tf/gradients)
+      double_q_action_selection_net = q_func(obs_tp1_float, num_actions=self.num_actions, scope=q_net_scope, reuse=True)
+      # Select an action based on the online network
+      double_q_action = tf.argmax(double_q_action_selection_net, axis=1)
+      # Evaluate the value using the target network
+      #q_tp1 = tf.reduce_sum(tf.one_hot(double_q_action, self.num_actions) * self.target_net, axis=1)
+      q_tp1 = tf.reduce_sum(tf.multiply(self.target_net, tf.one_hot(double_q_action, self.num_actions)), axis=1)
+
+    # 3. Error
+    # self.done_mask_ph = 1 if the next state corresponds to the end of an episode
+    target = self.rew_t_ph + (1. - self.done_mask_ph) * (gamma * q_tp1)
+    # Note: the target network variables are not passed to the optimizer, and therefore no gradient decent is performed and the values are not updeting with each iteration.
+    self.total_error = huber_loss(target - q_t)
 
     ######
 
@@ -191,6 +236,7 @@ class QLearner(object):
 
     self.start_time = None
     self.t = 0
+    self.greedy_rate = []
 
   def stopping_criterion_met(self):
     return self.stopping_criterion is not None and self.stopping_criterion(self.env, self.t)
@@ -229,6 +275,34 @@ class QLearner(object):
     #####
 
     # YOUR CODE HERE
+    # Store the last observation
+    idx = self.replay_buffer.store_frame(frame=self.last_obs)
+    # Load the input tensor
+    obs_t_ph_val = self.replay_buffer.encode_recent_observation()
+
+    # Choose an action
+    exploration_rate = self.exploration.value(self.t)
+    if not self.model_initialized or np.random.uniform() < exploration_rate:
+      # Sample a random action
+      action = self.env.action_space.sample()
+      self.greedy_rate.append(0)
+      #print("Random: %d" % action)
+    else:
+      # Choose the action with maximal value
+      action = self.session.run(self.action, feed_dict={self.obs_t_ph: np.expand_dims(obs_t_ph_val, axis=0)})
+      self.greedy_rate.append(1)
+      #print("Network: %d" % action)
+
+    # Run the action in the environment
+    next_obs, reward, done, info = self.env.step(action)
+    # Store the rest of the data in the buffer
+    self.replay_buffer.store_effect(idx, action, reward, done)
+    # Set self.last_obs to the next observation, reset env if needed
+    self.last_obs = self.env.reset() if done else next_obs
+    """
+    self.next_idx is always increasing, and then being normelized with modulo of the buffer size: 
+      (self.next_idx - 1) % self.size
+    """
 
   def update_model(self):
     ### 3. Perform experience replay and train the network.
@@ -243,6 +317,9 @@ class QLearner(object):
       # replay buffer code for function definition, each batch that you sample
       # should consist of current observations, current actions, rewards,
       # next observations, and done indicator).
+
+      obs_t_batch, act_batch, rew_batch, obs_tp1_batch, done_mask = self.replay_buffer.sample(self.batch_size)
+
       # 3.b: initialize the model if it has not been initialized yet; to do
       # that, call
       #    initialize_interdependent_variables(self.session, tf.global_variables(), {
@@ -253,6 +330,17 @@ class QLearner(object):
       # the current and next time step. The boolean variable model_initialized
       # indicates whether or not the model has been initialized.
       # Remember that you have to update the target network too (see 3.d)!
+
+      if not self.model_initialized:
+        #self.session.__enter__()
+        #tf.global_variables_initializer().run()
+        initialize_interdependent_variables(self.session, tf.global_variables(), {
+          self.obs_t_ph: obs_t_batch,
+          self.obs_tp1_ph: obs_tp1_batch,
+        })
+
+        self.model_initialized = True
+
       # 3.c: train the model. To do this, you'll need to use the self.train_fn and
       # self.total_error ops that were created earlier: self.total_error is what you
       # created to compute the total Bellman error in a batch, and self.train_fn
@@ -267,13 +355,25 @@ class QLearner(object):
       # (this is needed for computing self.total_error)
       # self.learning_rate -- you can get this from self.optimizer_spec.lr_schedule.value(t)
       # (this is needed by the optimizer to choose the learning rate)
+
+      feed_dict = {
+        self.obs_t_ph: obs_t_batch,
+        self.act_t_ph: act_batch,
+        self.rew_t_ph: rew_batch,
+        self.obs_tp1_ph: obs_tp1_batch,
+        self.done_mask_ph: done_mask,
+        self.learning_rate: self.optimizer_spec.lr_schedule.value(self.t),
+      }
+
+      self.session.run((self.total_error, self.train_fn), feed_dict=feed_dict)
+
       # 3.d: periodically update the target network by calling
       # self.session.run(self.update_target_fn)
       # you should update every target_update_freq steps, and you may find the
       # variable self.num_param_updates useful for this (it was initialized to 0)
       #####
-
-      # YOUR CODE HERE
+      if (self.num_param_updates % self.target_update_freq) == 0:
+        self.session.run(self.update_target_fn)
 
       self.num_param_updates += 1
 
@@ -295,6 +395,7 @@ class QLearner(object):
       print("episodes %d" % len(episode_rewards))
       print("exploration %f" % self.exploration.value(self.t))
       print("learning_rate %f" % self.optimizer_spec.lr_schedule.value(self.t))
+      print("Greedy rate: %f" % np.mean(self.greedy_rate))
       if self.start_time is not None:
         print("running time %f" % ((time.time() - self.start_time) / 60.))
 
@@ -302,8 +403,16 @@ class QLearner(object):
 
       sys.stdout.flush()
 
+      # Save the episodes reward
       with open(self.rew_file, 'wb') as f:
         pickle.dump(episode_rewards, f, pickle.HIGHEST_PROTOCOL)
+
+      # Save the results as a pd.DataFrame in hdf format
+      res = dict(mean_episode_reward=self.mean_episode_reward, best_mean_episode_reward=self.best_mean_episode_reward, timestep=self.t, episode_num=len(episode_rewards))
+      self.results.append(res)
+      df = pd.DataFrame(self.results)
+      df.to_hdf(self.hdf_file, key=HDF_KEY, mode='w')
+
 
 def learn(*args, **kwargs):
   alg = QLearner(*args, **kwargs)

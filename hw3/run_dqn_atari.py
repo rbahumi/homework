@@ -3,6 +3,7 @@ import gym
 from gym import wrappers
 import os.path as osp
 import random
+import time
 import numpy as np
 import tensorflow as tf
 import tensorflow.contrib.layers as layers
@@ -10,6 +11,9 @@ import tensorflow.contrib.layers as layers
 import dqn
 from dqn_utils import *
 from atari_wrappers import *
+
+DEFAULT_ENV_NAME = 'PongNoFrameskip-v4'
+DEFULT_EXPT_DIR = '/tmp/hw3_vid_dir/'
 
 
 def atari_model(img_in, num_actions, scope, reuse=False):
@@ -28,19 +32,17 @@ def atari_model(img_in, num_actions, scope, reuse=False):
 
         return out
 
-def atari_learn(env,
-                session,
-                num_timesteps):
+def get_default_config(env, session, num_timesteps):
     # This is just a rough estimate
     num_iterations = float(num_timesteps) / 4.0
 
     lr_multiplier = 1.0
     lr_schedule = PiecewiseSchedule([
-                                         (0,                   1e-4 * lr_multiplier),
-                                         (num_iterations / 10, 1e-4 * lr_multiplier),
-                                         (num_iterations / 2,  5e-5 * lr_multiplier),
-                                    ],
-                                    outside_value=5e-5 * lr_multiplier)
+        (0, 1e-4 * lr_multiplier),
+        (num_iterations / 10, 1e-4 * lr_multiplier),
+        (num_iterations / 2, 5e-5 * lr_multiplier),
+    ],
+        outside_value=5e-5 * lr_multiplier)
     optimizer = dqn.OptimizerSpec(
         constructor=tf.train.AdamOptimizer,
         kwargs=dict(epsilon=1e-4),
@@ -60,7 +62,7 @@ def atari_learn(env,
         ], outside_value=0.01
     )
 
-    dqn.learn(
+    config = dict(
         env=env,
         q_func=atari_model,
         optimizer_spec=optimizer,
@@ -77,7 +79,19 @@ def atari_learn(env,
         grad_norm_clipping=10,
         double_q=True
     )
+    return config
+
+def atari_learn(env, session, num_timesteps, config=None):
+    new_config = get_default_config(env, session, num_timesteps)
+
+    # Override default values
+    if isinstance(config, dict):
+        for key, value in config.items():
+            new_config[key] = value
+
+    dqn.learn(**new_config)
     env.close()
+
 
 def get_available_gpus():
     from tensorflow.python.client import device_lib
@@ -103,28 +117,39 @@ def get_session():
     print("AVAILABLE GPUS: ", get_available_gpus())
     return session
 
-def get_env(task, seed):
-    env = gym.make('PongNoFrameskip-v4')
+def get_env(seed, env_name, expt_dir):
+    env = gym.make(env_name)
 
     set_global_seeds(seed)
     env.seed(seed)
 
-    expt_dir = '/tmp/hw3_vid_dir2/'
     env = wrappers.Monitor(env, osp.join(expt_dir, "gym"), force=True)
     env = wrap_deepmind(env)
 
     return env
 
-def main():
-    # Get Atari games.
-    task = gym.make('PongNoFrameskip-v4')
+def get_rew_filename(env_name, config):
+    config_str = "_".join(["%s_%s" % (key, config[key]) for key in sorted(config.keys())])
+    rew_file = "_".join(['qlearner', env_name, config_str, time.strftime("%d-%m-%Y_%H-%M-%S")]) + '.pkl'
+    return rew_file
 
+
+def main(config=None, env_name=DEFAULT_ENV_NAME, expt_dir=DEFULT_EXPT_DIR):
     # Run training
     seed = random.randint(0, 9999)
     print('random seed = %d' % seed)
-    env = get_env(task, seed)
+    env = get_env(seed, env_name=env_name, expt_dir=expt_dir)
     session = get_session()
-    atari_learn(env, session, num_timesteps=2e8)
+
+    if config is None:
+        config = {}
+
+    if 'rew_file' not in config:
+        config['rew_file'] = get_rew_filename(env_name, config)
+
+    print("rew_file: %s" % config['rew_file'])
+    atari_learn(env, session, num_timesteps=2e8, config=config)
+
 
 if __name__ == "__main__":
     main()

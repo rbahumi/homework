@@ -5,13 +5,17 @@ Adapted for CS294-112 Fall 2018 by Soroush Nasiriany, Sid Reddy, and Greg Kahn
 """
 import numpy as np
 import tensorflow as tf
-import tensorflow_probability as tfp
+#import tensorflow_probability as tfp
+#tfd = tfp.distributions
+tfd = tf.contrib.distributions
 import gym
+import roboschool
 import logz
 import os
 import time
 import inspect
 from multiprocessing import Process
+from utils import normalize_array
 
 #============================================================================================#
 # Utilities
@@ -20,7 +24,7 @@ from multiprocessing import Process
 def build_mlp(input_placeholder, output_size, scope, n_layers, size, activation=tf.tanh, output_activation=None):
     """
         Builds a feedforward neural network
-        
+
         arguments:
             input_placeholder: placeholder variable for the state (batch_size, input_size)
             output_size: size of the output layer
@@ -29,15 +33,19 @@ def build_mlp(input_placeholder, output_size, scope, n_layers, size, activation=
             size: dimension of the hidden layer
             activation: activation of the hidden layers
             output_activation: activation of the ouput layers
-
         returns:
-            output placeholder of the network (the result of a forward pass) 
-
-        Hint: use tf.layers.dense    
+            output placeholder of the network (the result of a forward pass)
+        Hint: use tf.layers.dense
     """
-    # YOUR HW2 CODE HERE
-    raise NotImplementedError
-    return output_placeholder
+    # Create the hidden layers
+    layer = input_placeholder
+    for i in range(n_layers):
+        layer_name = "%s_hidden%d" % (scope, i)
+        layer = tf.keras.layers.Dense(units=size, activation=activation, name=layer_name)(layer)
+
+    # Create the output layer
+    predictions = tf.keras.layers.Dense(output_size, activation=output_activation, name="%s_output" % scope)(layer)
+    return predictions
 
 def pathlength(path):
     return len(path["reward"])
@@ -65,6 +73,9 @@ class Agent(object):
         self.learning_rate = computation_graph_args['learning_rate']
         self.num_target_updates = computation_graph_args['num_target_updates']
         self.num_grad_steps_per_target_update = computation_graph_args['num_grad_steps_per_target_update']
+        self.c_learning_rate = computation_graph_args['c_learning_rate']
+        self.c_n_layers = computation_graph_args['c_n_layers']
+        self.c_size = computation_graph_args['c_size']
 
         self.animate = sample_trajectory_args['animate']
         self.max_path_length = sample_trajectory_args['max_path_length']
@@ -85,56 +96,53 @@ class Agent(object):
             Placeholders for batch batch observations / actions / advantages in actor critic
             loss function.
             See Agent.build_computation_graph for notation
-
             returns:
                 sy_ob_no: placeholder for observations
                 sy_ac_na: placeholder for actions
                 sy_adv_n: placeholder for advantages
         """
-        raise NotImplementedError
+        # sy_ob_no will be used iteratively for sampling actions (one by one)
         sy_ob_no = tf.placeholder(shape=[None, self.ob_dim], name="ob", dtype=tf.float32)
+
+        # sy_ac_na and sy_adv_n will be used at the end of each batch of trajectories for computing the batch's loss and gradients
         if self.discrete:
-            sy_ac_na = tf.placeholder(shape=[None], name="ac", dtype=tf.int32) 
+            sy_ac_na = tf.placeholder(shape=[None], name="ac", dtype=tf.int32)
         else:
-            sy_ac_na = tf.placeholder(shape=[None, self.ac_dim], name="ac", dtype=tf.float32) 
-        # YOUR HW2 CODE HERE
-        sy_adv_n = None
+            sy_ac_na = tf.placeholder(shape=[None, self.ac_dim], name="ac", dtype=tf.float32)
+
+        sy_adv_n = tf.placeholder(shape=[None], name="adv", dtype=tf.float32)
         return sy_ob_no, sy_ac_na, sy_adv_n
 
     def policy_forward_pass(self, sy_ob_no):
         """ Constructs the symbolic operation for the policy network outputs,
             which are the parameters of the policy distribution p(a|s)
-
             arguments:
                 sy_ob_no: (batch_size, self.ob_dim)
-
             returns:
                 the parameters of the policy.
-
                 if discrete, the parameters are the logits of a categorical distribution
                     over the actions
                     sy_logits_na: (batch_size, self.ac_dim)
-
                 if continuous, the parameters are a tuple (mean, log_std) of a Gaussian
                     distribution over actions. log_std should just be a trainable
                     variable, not a network output.
                     sy_mean: (batch_size, self.ac_dim)
                     sy_logstd: (self.ac_dim,)
-
             Hint: use the 'build_mlp' function to output the logits (in the discrete case)
                 and the mean (in the continuous case).
                 Pass in self.n_layers for the 'n_layers' argument, and
                 pass in self.size for the 'size' argument.
         """
-        raise NotImplementedError
+
+        # Create a Keras model and Save it to a private variable
+        self._predictions =  build_mlp(sy_ob_no, output_size=self.ac_dim, scope='main_model', size=self.size, n_layers=self.n_layers)  # activation, output_activation
+
         if self.discrete:
-            # YOUR_HW2 CODE_HERE
-            sy_logits_na = None
+            sy_logits_na = self._predictions
             return sy_logits_na
         else:
-            # YOUR_HW2 CODE_HERE
-            sy_mean = None
-            sy_logstd = None
+            sy_mean = self._predictions
+            sy_logstd = tf.get_variable("sy_logstd", shape=(self.ac_dim), initializer=tf.zeros_initializer())
             return (sy_mean, sy_logstd)
 
     def sample_action(self, policy_parameters):
@@ -161,47 +169,62 @@ class Agent(object):
         
                  This reduces the problem to just sampling z. (Hint: use tf.random_normal!)
         """
-        raise NotImplementedError
         if self.discrete:
             sy_logits_na = policy_parameters
-            # YOUR_HW2 CODE_HERE
-            sy_sampled_ac = None
+            # Tensorflow had now added tf.random.categorical.
+            # References/ideas of self implementation can be found here:
+            #   - https://timvieira.github.io/blog/post/2014/07/31/gumbel-max-trick/
+            #   - https://github.com/tensorflow/tensorflow/issues/456
+            sy_sampled_ac = tf.squeeze(tf.random.categorical(sy_logits_na, 1), axis = [1])
+
         else:
             sy_mean, sy_logstd = policy_parameters
-            # YOUR_HW2 CODE_HERE
-            sy_sampled_ac = None
+            # Get the std values (exponent over log std)
+            sy_std = tf.exp(sy_logstd)
+            # Reshape sy_std shape: (ac_dim) => (batch_size, ac_dim)
+            sy_std = tf.reshape(tf.tile(sy_std, tf.shape(sy_mean)[0:1]), tf.shape(sy_mean))
+            # Sample the actions from a normal distribution with mean=sy_mean and std=sy_std
+            sy_sampled_ac = tf.random.normal(shape=tf.shape(sy_mean), mean=sy_mean, stddev=sy_std, dtype=tf.float32)
+
         return sy_sampled_ac
 
     def get_log_prob(self, policy_parameters, sy_ac_na):
         """ Constructs a symbolic operation for computing the log probability of a set of actions
             that were actually taken according to the policy
-
             arguments:
                 policy_parameters
-                    if discrete: logits of a categorical distribution over actions 
+                    if discrete: logits of a categorical distribution over actions
                         sy_logits_na: (batch_size, self.ac_dim)
                     if continuous: (mean, log_std) of a Gaussian distribution over actions
                         sy_mean: (batch_size, self.ac_dim)
                         sy_logstd: (self.ac_dim,)
-
-                sy_ac_na: (batch_size, self.ac_dim)
-
+                sy_ac_na:
+                    if discrete: (batch_size,)
+                    if continuous: (batch_size, self.ac_dim)
             returns:
                 sy_logprob_n: (batch_size)
-
             Hint:
                 For the discrete case, use the log probability under a categorical distribution.
                 For the continuous case, use the log probability under a multivariate gaussian.
         """
-        raise NotImplementedError
         if self.discrete:
             sy_logits_na = policy_parameters
-            # YOUR_HW2 CODE_HERE
-            sy_logprob_n = None
+            # Note: sy_ac_na is the placeholder for the actions. At the end of the trajectory batch, We feed it with all the sampled actions
+            sy_logprob_n = - tf.nn.sparse_softmax_cross_entropy_with_logits(labels=sy_ac_na, logits=sy_logits_na)
+
         else:
             sy_mean, sy_logstd = policy_parameters
-            # YOUR_HW2 CODE_HERE
-            sy_logprob_n = None
+
+            # Get the std values (exponent over log std)
+            sy_std = tf.exp(sy_logstd)
+
+            # Create a multivariate normal distribution based on the mean and stv tensors
+            mvn = tfd.MultivariateNormalDiag(loc=sy_mean, scale_diag=sy_std)
+
+            # Calculate the log probabilities
+            sy_logprob_n = mvn.log_prob(sy_ac_na)
+
+
         return sy_logprob_n
 
     def build_computation_graph(self):
@@ -246,11 +269,11 @@ class Agent(object):
                                 self.sy_ob_no,
                                 1,
                                 "nn_critic",
-                                n_layers=self.n_layers,
-                                size=self.size))
+                                n_layers= self.c_n_layers,
+                                size=self.c_size))
         self.sy_target_n = tf.placeholder(shape=[None], name="critic_target", dtype=tf.float32)
         self.critic_loss = tf.losses.mean_squared_error(self.sy_target_n, self.critic_prediction)
-        self.critic_update_op = tf.train.AdamOptimizer(self.learning_rate).minimize(self.critic_loss)
+        self.critic_update_op = tf.train.AdamOptimizer(self.c_learning_rate).minimize(self.critic_loss)
 
     def sample_trajectories(self, itr, env):
         # Collect paths until we have enough timesteps
@@ -274,24 +297,23 @@ class Agent(object):
                 env.render()
                 time.sleep(0.1)
             obs.append(ob)
-            raise NotImplementedError
-            ac = None # YOUR HW2 CODE HERE
+            ac = self.sess.run(self.sy_sampled_ac, feed_dict={self.sy_ob_no: ob.reshape(1, -1)})
             ac = ac[0]
             acs.append(ac)
             ob, rew, done, _ = env.step(ac)
             # add the observation after taking a step to next_obs
             # YOUR CODE HERE
-            raise NotImplementedError
+            next_obs.append(ob)
             rewards.append(rew)
             steps += 1
             # If the episode ended, the corresponding terminal value is 1
             # otherwise, it is 0
-            # YOUR CODE HERE
             if done or steps > self.max_path_length:
-                raise NotImplementedError
+                terminals.append(1)
                 break
             else:
-                raise NotImplementedError
+                terminals.append(0)
+
         path = {"observation" : np.array(obs, dtype=np.float32), 
                 "reward" : np.array(rewards, dtype=np.float32), 
                 "action" : np.array(acs, dtype=np.float32),
@@ -324,13 +346,20 @@ class Agent(object):
         # and V(s) when subtracting the baseline
         # Note: don't forget to use terminal_n to cut off the V(s') term when computing Q(s, a)
         # otherwise the values will grow without bound.
-        # YOUR CODE HERE
-        raise NotImplementedError
-        adv_n = None
+
+        # Calculate the current state value
+        v_n = self.sess.run(self.critic_prediction, feed_dict={self.sy_ob_no: ob_no})
+        # Calculate the next state value
+        v_next = self.sess.run(self.critic_prediction, feed_dict= {self.sy_ob_no: next_ob_no})
+        # Estimate the Q value as Q(s, a) = r(s, a) + gamma*V(s')
+        q_n = re_n + (1. - terminal_n) * (self.gamma * v_next)
+        # To get the advantage, subtract the V(s) to get A(s, a) = Q(s, a) - V(s)
+        adv_n = q_n - v_n
 
         if self.normalize_advantages:
-            raise NotImplementedError
-            adv_n = None # YOUR_HW2 CODE_HERE
+            # On the next line, implement a trick which is known empirically to reduce variance
+            # in policy gradient methods: normalize adv_n to have mean zero and std=1.
+            adv_n = normalize_array(adv_n)
         return adv_n
 
     def update_critic(self, ob_no, next_ob_no, re_n, terminal_n):
@@ -360,7 +389,18 @@ class Agent(object):
         # Note: don't forget to use terminal_n to cut off the V(s') term when computing the target
         # otherwise the values will grow without bound.
         # YOUR CODE HERE
-        raise NotImplementedError
+
+        for i in range(self.num_target_updates):
+            ## Calculate the target every 'num_grad_steps_per_target_update' number of steps
+            # Calculate the next state value
+            v_next = self.sess.run(self.critic_prediction, feed_dict={self.sy_ob_no: next_ob_no})
+            # Estimate the Q value as Q(s, a) = r(s, a) + gamma*V(s')
+            target_n = re_n + (1. - terminal_n) * (self.gamma * v_next)
+
+            # Calculate the gradient 'num_target_updates' times
+            for j in range(self.num_grad_steps_per_target_update):
+                # Update the critic network
+                self.sess.run((self.critic_update_op), feed_dict = {self.sy_ob_no: ob_no, self.sy_target_n: target_n})
 
     def update_actor(self, ob_no, ac_na, adv_n):
         """ 
@@ -388,6 +428,7 @@ def train_AC(
         min_timesteps_per_batch, 
         max_path_length,
         learning_rate,
+        c_learning_rate,
         num_target_updates,
         num_grad_steps_per_target_update,
         animate, 
@@ -395,7 +436,9 @@ def train_AC(
         normalize_advantages,
         seed,
         n_layers,
-        size):
+        size,
+        c_n_layers,
+        c_size):
 
     start = time.time()
 
@@ -436,6 +479,9 @@ def train_AC(
         'discrete': discrete,
         'size': size,
         'learning_rate': learning_rate,
+        'c_learning_rate': c_learning_rate,
+        'c_n_layers': c_n_layers,
+        'c_size': c_size,
         'num_target_updates': num_target_updates,
         'num_grad_steps_per_target_update': num_grad_steps_per_target_update,
         }
@@ -479,10 +525,11 @@ def train_AC(
 
         # Call tensorflow operations to:
         # (1) update the critic, by calling agent.update_critic
+        agent.update_critic(ob_no, next_ob_no, re_n, terminal_n)
         # (2) use the updated critic to compute the advantage by, calling agent.estimate_advantage
+        adv_n = agent.estimate_advantage(ob_no, next_ob_no, re_n, terminal_n)
         # (3) use the estimated advantage values to update the actor, by calling agent.update_actor
-        # YOUR CODE HERE
-        raise NotImplementedError
+        agent.update_actor(ob_no, ac_na, adv_n)
 
         # Log diagnostics
         returns = [path["reward"].sum() for path in paths]
@@ -511,14 +558,18 @@ def main():
     parser.add_argument('--n_iter', '-n', type=int, default=100)
     parser.add_argument('--batch_size', '-b', type=int, default=1000)
     parser.add_argument('--ep_len', '-ep', type=float, default=-1.)
-    parser.add_argument('--learning_rate', '-lr', type=float, default=5e-3)
     parser.add_argument('--dont_normalize_advantages', '-dna', action='store_true')
     parser.add_argument('--num_target_updates', '-ntu', type=int, default=10)
     parser.add_argument('--num_grad_steps_per_target_update', '-ngsptu', type=int, default=10)
     parser.add_argument('--seed', type=int, default=1)
     parser.add_argument('--n_experiments', '-e', type=int, default=1)
+    parser.add_argument('--learning_rate', '-lr', type=float, default=5e-3)
     parser.add_argument('--n_layers', '-l', type=int, default=2)
     parser.add_argument('--size', '-s', type=int, default=64)
+    parser.add_argument('--c_learning_rate', '-clr', type=float, default=5e-3)
+    parser.add_argument('--c_n_layers', '-cl', type=int, default=2)
+    parser.add_argument('--c_size', '-cs', type=int, default=64)
+
     args = parser.parse_args()
 
     data_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'data')
@@ -554,8 +605,10 @@ def main():
                 normalize_advantages=not(args.dont_normalize_advantages),
                 seed=seed,
                 n_layers=args.n_layers,
-                size=args.size
-                )
+                size=args.size,
+                c_learning_rate=args.c_learning_rate,
+                c_n_layers=args.c_n_layers,
+                c_size=args.c_size)
         # # Awkward hacky process runs, because Tensorflow does not like
         # # repeatedly calling train_AC in the same thread.
         p = Process(target=train_func, args=tuple())
